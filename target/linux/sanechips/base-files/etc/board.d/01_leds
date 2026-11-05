@@ -14,6 +14,10 @@ zte,zxhn-h3600)
 	ucidef_set_led_netdev "internet" "internet" "green:wan-online" "wan" "link tx rx"
 	ucidef_set_led_usbport "usb" "USB" "green:usb" "usb1-port1" "usb2-port1"
 	;;
+zte,zxhn-f670l)
+	ucidef_set_led_wlan "wlan" "WLAN" "green:wlan" "phy0tpt"
+	ucidef_set_led_usbport "usb" "USB" "green:usb" "usb1-port1"
+	;;
 esac
 
 board_config_flush

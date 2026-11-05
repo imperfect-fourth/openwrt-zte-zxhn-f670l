@@ -1,0 +1,274 @@
+// SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
+/dts-v1/;
+
+#include "zte/zx279128s.dtsi"
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/leds/common.h>
+
+/ {
+	model = "ZTE ZXHN F670L";
+	compatible = "zte,zxhn-f670l", "zte,zx279128s";
+
+	aliases {
+		serial0 = &serial0;
+		ethernet0 = &gmac;
+	};
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+	};
+
+	memory@40000000 {
+		device_type = "memory";
+		reg = <0x40000000 0x10000000>;
+	};
+
+	/* U-Boot's Ethernet DMA buffers stay live after a TFTP boot */
+	reserved-memory {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		bootloader-dma@40000000 {
+			reg = <0x40000000 0x08000000>;
+			no-map;
+		};
+	};
+};
+
+/ {
+	keys {
+		compatible = "gpio-keys-polled";
+		poll-interval = <20>;
+
+		reset {
+			label = "reset";
+			gpios = <&gpio1 2 GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_RESTART>;
+		};
+
+		wps {
+			label = "wps";
+			gpios = <&gpio0 3 GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_WPS_BUTTON>;
+		};
+
+		wifi {
+			label = "wifi";
+			gpios = <&gpio0 1 GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_RFKILL>;
+		};
+	};
+
+	aliases {
+		led-boot = &led_power;
+		led-failsafe = &led_power;
+		led-running = &led_power;
+		led-upgrade = &led_power;
+	};
+
+	leds {
+		compatible = "gpio-leds";
+
+		led_power: power {
+			function = LED_FUNCTION_POWER;
+			color = <LED_COLOR_ID_GREEN>;
+			gpios = <&gpio2 8 GPIO_ACTIVE_LOW>;
+			default-state = "on";
+		};
+
+		pon {
+			function = "pon";
+			color = <LED_COLOR_ID_GREEN>;
+			gpios = <&gpio2 9 GPIO_ACTIVE_LOW>;
+		};
+
+		los {
+			function = "los";
+			color = <LED_COLOR_ID_RED>;
+			gpios = <&gpio0 8 GPIO_ACTIVE_LOW>;
+		};
+
+		internet {
+			function = LED_FUNCTION_WAN_ONLINE;
+			color = <LED_COLOR_ID_GREEN>;
+			gpios = <&gpio3 12 GPIO_ACTIVE_LOW>;
+		};
+
+		wlan {
+			function = LED_FUNCTION_WLAN;
+			color = <LED_COLOR_ID_GREEN>;
+			gpios = <&gpio1 11 GPIO_ACTIVE_LOW>;
+		};
+
+		wps {
+			function = LED_FUNCTION_WPS;
+			color = <LED_COLOR_ID_GREEN>;
+			gpios = <&gpio1 9 GPIO_ACTIVE_LOW>;
+		};
+
+		usb {
+			function = LED_FUNCTION_USB;
+			color = <LED_COLOR_ID_GREEN>;
+			gpios = <&gpio3 3 GPIO_ACTIVE_LOW>;
+		};
+
+		phone {
+			function = "phone";
+			color = <LED_COLOR_ID_GREEN>;
+			gpios = <&gpio1 8 GPIO_ACTIVE_LOW>;
+		};
+	};
+};
+
+/* Stock layout; OpenWrt replaces the second firmware bank (kernel2) */
+&spifc {
+	status = "okay";
+
+	flash@0 {
+		compatible = "spi-nand";
+		reg = <0>;
+		spi-max-frequency = <50000000>;
+		spi-rx-bus-width = <2>;
+
+		partitions {
+			compatible = "fixed-partitions";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			partition@0 {
+				label = "u-boot";
+				reg = <0x0 0x200000>;
+				read-only;
+			};
+
+			/* BootImageNum selects the bank U-Boot boots */
+			partition@200000 {
+				label = "others";
+				reg = <0x200000 0x400000>;
+			};
+
+			partition@600000 {
+				label = "parameter-tags";
+				reg = <0x600000 0x400000>;
+				read-only;
+			};
+
+			partition@a00000 {
+				label = "wlan";
+				reg = <0xa00000 0x400000>;
+				read-only;
+			};
+
+			partition@e00000 {
+				label = "usercfg";
+				reg = <0xe00000 0x800000>;
+				read-only;
+			};
+
+			partition@1600000 {
+				label = "middleware";
+				reg = <0x1600000 0x400000>;
+				read-only;
+			};
+
+			partition@1a00000 {
+				label = "kernel1";
+				reg = <0x1a00000 0x2000000>;
+				read-only;
+			};
+
+			/* Bank header and the JFFS2 holding /0uImage */
+			partition@3a00000 {
+				label = "kernel";
+				reg = <0x3a00000 0x620000>;
+			};
+
+			partition@4020000 {
+				label = "ubi";
+				reg = <0x4020000 0x19e0000>;
+			};
+		};
+	};
+};
+
+&serial0 { status = "okay"; };
+&serial1 { status = "disabled"; };
+
+&topcrm {
+	reboot { status = "disabled"; };
+};
+
+&l2cc {
+	zte,l2c-io-read-lock;
+};
+
+&twd_wdt { status = "okay"; };
+
+&gpio0 { status = "okay"; };
+&gpio1 { status = "okay"; };
+&gpio2 { status = "okay"; };
+&gpio3 { status = "okay"; };
+&gpio4 { status = "okay"; };
+&gpio5 { status = "okay"; };
+
+&lsp1crpm { status = "okay"; };
+
+&mdio {
+	status = "okay";
+
+	f670l_phy10: ethernet-phy@a { reg = <10>; };
+	f670l_phy11: ethernet-phy@b { reg = <11>; };
+	f670l_phy12: ethernet-phy@c { reg = <12>; };
+	f670l_phy13: ethernet-phy@d { reg = <13>; };
+};
+
+&gmac { status = "okay"; };
+&gmac_port0 { label = "lan4"; phy-handle = <&f670l_phy10>; phy-mode = "internal"; status = "okay"; };
+&gmac_port1 { label = "lan3"; phy-handle = <&f670l_phy11>; phy-mode = "internal"; status = "okay"; };
+&gmac_port2 { label = "lan2"; phy-handle = <&f670l_phy12>; phy-mode = "internal"; status = "okay"; };
+&gmac_port3 { label = "lan1"; phy-handle = <&f670l_phy13>; phy-mode = "internal"; status = "okay"; };
+
+/* PCIe Wi-Fi: stock F670L does not write the PHY1 calibration */
+&crm2 { status = "okay"; };
+&pinmux { status = "okay"; };
+&pcie0_phy { status = "okay"; };
+&pcie1_phy { status = "okay"; zte,no-calibration; };
+&pcie0 { status = "okay"; };
+&pcie1 { status = "okay"; };
+
+/* Calibration from the stock wlan partition, loaded by 11-mt76-caldata */
+&pcie0 {
+	pcie@0,0 {
+		reg = <0x0000 0 0 0 0>;
+		#address-cells = <3>;
+		#size-cells = <2>;
+		ranges;
+
+		wifi@0,0 {
+			compatible = "mediatek,mt76";
+			reg = <0x10000 0 0 0 0>;
+			mediatek,eeprom-file = "zte-f670l-mt7663.eeprom";
+		};
+	};
+};
+
+&pcie1 {
+	pcie@0,0 {
+		reg = <0x0000 0 0 0 0>;
+		#address-cells = <3>;
+		#size-cells = <2>;
+		ranges;
+
+		wifi@0,0 {
+			compatible = "mediatek,mt76";
+			reg = <0x10000 0 0 0 0>;
+			mediatek,eeprom-file = "zte-f670l-mt7603.eeprom";
+		};
+	};
+};
+
+&usb { status = "okay"; };
+&usb2_phy { status = "okay"; };
+&usb2 { status = "okay"; };

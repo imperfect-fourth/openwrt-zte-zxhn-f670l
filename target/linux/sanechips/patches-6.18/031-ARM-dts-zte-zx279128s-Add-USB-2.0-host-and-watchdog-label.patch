@@ -1,0 +1,46 @@
+From: Divyansh <divi09112@gmail.com>
+Subject: [PATCH] ARM: dts: zte: zx279128s: Add USB 2.0 host and watchdog label
+
+---
+--- a/arch/arm/boot/dts/zte/zx279128s.dtsi
++++ b/arch/arm/boot/dts/zte/zx279128s.dtsi
+@@ -82,7 +82,7 @@
+ 			clocks = <&topcrm ZX279128S_TOP_A9_PERIPH>;
+ 		};
+ 
+-		watchdog@800620 {
++		twd_wdt: watchdog@800620 {
+ 			compatible = "arm,cortex-a9-twd-wdt";
+ 			reg = <0x00800620 0x20>;
+ 			interrupts = <GIC_PPI 14 (GIC_CPU_MASK_SIMPLE(2) | IRQ_TYPE_EDGE_RISING)>;
+@@ -125,6 +125,16 @@
+ 			zte,l2c-io-read-lock;
+ 		};
+ 
++		usb2: usb@9000000 {
++			compatible = "snps,dwc2";
++			reg = <0x09000000 0x10000>;
++			interrupts = <GIC_SPI 44 IRQ_TYPE_LEVEL_HIGH>;
++			phys = <&usb2_phy>;
++			phy-names = "usb2-phy";
++			dr_mode = "host";
++			status = "disabled";
++		};
++
+ 		usb: usb@9100000 {
+ 			compatible = "zte,zx279128s-dwc3";
+ 			reg = <0x09100000 0x100000>;
+@@ -270,6 +280,13 @@
+ 				reg = <1>;
+ 				#phy-cells = <0>;
+ 			};
++
++			usb2_phy: phy@2 {
++				compatible = "zte,zx279128s-usb2-phy";
++				reg = <2>;
++				#phy-cells = <0>;
++				status = "disabled";
++			};
+ 		};
+ 
+ 		crm2: clock-controller@94100000 {

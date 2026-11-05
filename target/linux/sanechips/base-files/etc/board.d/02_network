@@ -2,17 +2,44 @@
 # SPDX-License-Identifier: GPL-2.0-only
 
 . /lib/functions/uci-defaults.sh
+. /lib/functions/system.sh
+
+sanechips_setup_interfaces()
+{
+	local board="$1"
+
+	case "$board" in
+	zte,zxhn-f670l)
+		ucidef_set_interfaces_lan_wan "lan1 lan2 lan3" "lan4"
+		;;
+	*)
+		ucidef_set_interfaces_lan_wan "lan1 lan2 lan3 lan4" "wan"
+		;;
+	esac
+}
+
+sanechips_setup_macs()
+{
+	local board="$1"
+	local lan_mac=""
+	local wan_mac=""
+
+	case "$board" in
+	zte,zxhn-f670l)
+		. /lib/functions/zte-paramtag.sh
+		lan_mac=$(zte_paramtag_base_mac)
+		[ -n "$lan_mac" ] && wan_mac=$(macaddr_add "$lan_mac" 3)
+		;;
+	esac
+
+	[ -n "$lan_mac" ] && ucidef_set_interface_macaddr "lan" $lan_mac
+	[ -n "$wan_mac" ] && ucidef_set_interface_macaddr "wan" $wan_mac
+}
 
 board_config_update
-
 board=$(board_name)
-
-case "$board" in
-*)
-	ucidef_set_interfaces_lan_wan "lan1 lan2 lan3 lan4" "wan"
-	;;
-esac
-
+sanechips_setup_interfaces $board
+sanechips_setup_macs $board
 board_config_flush
 
 exit 0
