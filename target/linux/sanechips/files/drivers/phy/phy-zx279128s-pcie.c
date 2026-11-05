@@ -15,12 +15,14 @@
 #include <linux/of.h>
 #include <linux/phy/phy.h>
 #include <linux/platform_device.h>
+#include <linux/property.h>
 #include <linux/regmap.h>
 
 #define CRM1_PHY_CTRL		0x008
 #define CRM1_MISC		0x024
 #define CRM1_MISC_BIT26		BIT(26)
 #define CRM1_PHY1_CAL0		0x1b0
+#define CRM1_USB2_ON		(GENMASK(24, 20) | BIT(16))
 #define CRM1_PHY1_CAL1		0x1b4
 
 struct zx_pcie_phy_port {
@@ -42,6 +44,7 @@ struct zx_pcie_phy {
 	struct regmap *regmap;
 	const struct zx_pcie_phy_port *port;
 	unsigned int port_id;
+	bool cal;
 };
 
 static int zx_pcie_phy_init(struct phy *phy)
@@ -57,7 +60,7 @@ static int zx_pcie_phy_init(struct phy *phy)
 			return ret;
 		fsleep(50);
 
-		if (i == 0 && port->has_cal) {
+		if (i == 0 && zphy->cal) {
 			ret = regmap_write(zphy->regmap, CRM1_PHY1_CAL1, 0x00202d5a);
 			if (ret)
 				return ret;
@@ -97,6 +100,29 @@ static const struct phy_ops zx_pcie_phy_ops = {
 	.owner = THIS_MODULE,
 };
 
+static int zx_usb2_phy_init(struct phy *phy)
+{
+	struct zx_pcie_phy *zphy = phy_get_drvdata(phy);
+	int ret;
+
+	ret = regmap_set_bits(zphy->regmap, CRM1_PHY_CTRL, CRM1_USB2_ON);
+	fsleep(10000);
+	return ret;
+}
+
+static int zx_usb2_phy_exit(struct phy *phy)
+{
+	struct zx_pcie_phy *zphy = phy_get_drvdata(phy);
+
+	return regmap_clear_bits(zphy->regmap, CRM1_PHY_CTRL, CRM1_USB2_ON);
+}
+
+static const struct phy_ops zx_usb2_phy_ops = {
+	.init = zx_usb2_phy_init,
+	.exit = zx_usb2_phy_exit,
+	.owner = THIS_MODULE,
+};
+
 static int zx_pcie_phy_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -106,9 +132,14 @@ static int zx_pcie_phy_probe(struct platform_device *pdev)
 	u32 port_id;
 	int ret;
 
+	const struct phy_ops *ops = device_get_match_data(dev);
+
 	zphy = devm_kzalloc(dev, sizeof(*zphy), GFP_KERNEL);
 	if (!zphy)
 		return -ENOMEM;
+
+	if (ops == &zx_usb2_phy_ops)
+		goto create;
 
 	ret = of_property_read_u32(dev->of_node, "reg", &port_id);
 	if (ret)
@@ -119,13 +150,16 @@ static int zx_pcie_phy_probe(struct platform_device *pdev)
 
 	zphy->port_id = port_id;
 	zphy->port = &zx_phy_ports[port_id];
+	zphy->cal = zphy->port->has_cal &&
+		    !of_property_read_bool(dev->of_node, "zte,no-calibration");
 
+create:
 	zphy->regmap = syscon_node_to_regmap(dev->parent->of_node);
 	if (IS_ERR(zphy->regmap))
 		return dev_err_probe(dev, PTR_ERR(zphy->regmap),
 				     "failed to get parent topcrm regmap\n");
 
-	phy = devm_phy_create(dev, dev->of_node, &zx_pcie_phy_ops);
+	phy = devm_phy_create(dev, dev->of_node, ops);
 	if (IS_ERR(phy))
 		return dev_err_probe(dev, PTR_ERR(phy), "failed to create phy\n");
 
@@ -136,7 +170,8 @@ static int zx_pcie_phy_probe(struct platform_device *pdev)
 }
 
 static const struct of_device_id zx_pcie_phy_of_match[] = {
-	{ .compatible = "zte,zx279128s-pcie-phy" },
+	{ .compatible = "zte,zx279128s-pcie-phy", .data = &zx_pcie_phy_ops },
+	{ .compatible = "zte,zx279128s-usb2-phy", .data = &zx_usb2_phy_ops },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, zx_pcie_phy_of_match);
