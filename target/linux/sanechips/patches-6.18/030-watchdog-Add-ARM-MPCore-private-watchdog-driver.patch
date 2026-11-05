@@ -1,0 +1,31 @@
+From: Divyansh <divi09112@gmail.com>
+Subject: [PATCH] watchdog: Add ARM Cortex-A9 MPCore private watchdog driver
+
+---
+--- a/drivers/watchdog/Kconfig	2026-11-05 12:04:05.090127935 +0530
++++ b/drivers/watchdog/Kconfig	2026-11-05 12:04:05.102839188 +0530
+@@ -428,6 +428,14 @@
+ 	  Watchdog timer embedded into Airoha SoC. This will reboot your
+ 	  system when the timeout is reached.
+ 
++config ARM_MPCORE_WATCHDOG
++	tristate "ARM Cortex-A9 MPCore private watchdog"
++	depends on (ARM && SMP && OF) || COMPILE_TEST
++	select WATCHDOG_CORE
++	help
++	  Private watchdog of the ARM Cortex-A9 MPCore. Only the CPU0 bank
++	  is used.
++
+ config ARM_SP805_WATCHDOG
+ 	tristate "ARM SP805 Watchdog"
+ 	depends on (ARM || ARM64 || COMPILE_TEST) && ARM_AMBA
+--- a/drivers/watchdog/Makefile	2026-11-05 12:04:05.090198779 +0530
++++ b/drivers/watchdog/Makefile	2026-11-05 12:04:05.102984072 +0530
+@@ -37,6 +37,7 @@
+ # ALPHA Architecture
+ 
+ # ARM Architecture
++obj-$(CONFIG_ARM_MPCORE_WATCHDOG) += mpcore_wdt.o
+ obj-$(CONFIG_ARM_SP805_WATCHDOG) += sp805_wdt.o
+ obj-$(CONFIG_ARM_SBSA_WATCHDOG) += sbsa_gwdt.o
+ obj-$(CONFIG_ARMADA_37XX_WATCHDOG) += armada_37xx_wdt.o
