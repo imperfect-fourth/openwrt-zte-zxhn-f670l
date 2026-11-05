@@ -57,4 +57,19 @@ define Device/zte_zxhn-h3600
 endef
 TARGET_DEVICES += zte_zxhn-h3600
 
+# RAM boot only until a flash layout is supported
+define Device/zte_zxhn-f670l
+  DEVICE_MODEL := ZXHN F670L
+  DEVICE_DTS := zx279128s-zte-zxhn-f670l
+  DEVICE_PACKAGES := kmod-leds-gpio kmod-usb-ledtrig-usbport
+  KERNEL_LOADADDR := 0x48008000
+  KERNEL_ENTRY := 0x48008000
+  KERNEL := kernel-bin | append-dtb
+  KERNEL_INITRAMFS := kernel-bin | append-dtb | uImage-ramboot
+  KERNEL_INITRAMFS_SUFFIX := .uImage
+  IMAGES :=
+  ARTIFACTS :=
+endef
+TARGET_DEVICES += zte_zxhn-f670l
+
 $(eval $(call BuildImage))

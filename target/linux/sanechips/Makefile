@@ -8,6 +8,7 @@ BOARDNAME:=Sanechips ZX279128
 FEATURES:=squashfs nand usb pci pcie ramdisk
 CPU_TYPE:=cortex-a9
 SUBTARGETS:=generic
+DEVICE_TYPE:=basic
 
 KERNEL_PATCHVER:=6.18
 

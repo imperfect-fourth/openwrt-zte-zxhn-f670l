@@ -1,0 +1,20 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+
+[ "$ACTION" = add ] || exit 0
+
+. /lib/functions.sh
+
+[ "$(board_name)" = zte,zxhn-f670l ] || exit 0
+
+# Stock assigns base +4 to the 2.4 GHz radio and base +5 to the 5 GHz radio
+case "$(cat "/sys${DEVPATH}/device/modalias" 2>/dev/null)" in
+pci:v000014C3d00007603*) offset=4 ;;
+pci:v000014C3d00007663*) offset=5 ;;
+*) exit 0 ;;
+esac
+
+. /lib/functions/zte-paramtag.sh
+
+base_mac=$(zte_paramtag_base_mac) || exit 1
+macaddr_add "$base_mac" $offset > "/sys${DEVPATH}/macaddress"

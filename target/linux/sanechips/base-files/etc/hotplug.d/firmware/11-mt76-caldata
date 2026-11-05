@@ -25,6 +25,22 @@ zte_caldata_from_jffs2() {
 	rmdir $dir
 }
 
+# The F670L stock firmware keeps caldata (MT7603) and caldata5g (MT7663) in
+# the JFFS2 filesystem of the "wlan" partition.
+zte_f670l_caldata() {
+	local dir=/tmp/wlan-caldata
+
+	mkdir -p $dir
+	mount -t jffs2 -o ro mtd:wlan $dir || caldata_die "failed to mount wlan"
+	if [ -s $dir/$1 ]; then
+		caldata_from_file $dir/$1 0x0 $2
+	else
+		echo "caldata: no $1 in wlan"
+	fi
+	umount $dir
+	rmdir $dir
+}
+
 board=$(board_name)
 
 case "$FIRMWARE" in
@@ -35,5 +51,11 @@ case "$FIRMWARE" in
 		zte_caldata_from_jffs2
 		;;
 	esac
+	;;
+"zte-f670l-mt7603.eeprom")
+	[ "$board" = zte,zxhn-f670l ] && zte_f670l_caldata caldata 0x200
+	;;
+"zte-f670l-mt7663.eeprom")
+	[ "$board" = zte,zxhn-f670l ] && zte_f670l_caldata caldata5g 0x600
 	;;
 esac
