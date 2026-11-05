@@ -28,6 +28,7 @@
 #include <linux/io.h>
 #include <linux/iopoll.h>
 #include <linux/kernel.h>
+#include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_net.h>
@@ -38,6 +39,13 @@
 
 #include "zx279128s-eth.h"
 
+static_assert(ZX_NUM_BUFFERS == 2048);
+static_assert(ZX_JUMBO_OFFSET + ZX_JUMBO_SIZE <= ZX_TAB0_OFFSET);
+static_assert(ZX_TAB0_OFFSET + 0x10000 <= ZX_TAB1_OFFSET);
+static_assert(ZX_TAB1_OFFSET + 0x10000 <= ZX_RX_OFFSET);
+static_assert(ZX_RX_OFFSET + ZX_RX_QUEUES * ZX_RX_QUEUE_STRIDE <= ZX_AREA50_OFFSET);
+static_assert(ZX_TX_OFFSET + ZX_NUM_TX_DESC * ZX_DESC_SIZE <= ZX_DMA_ARENA_SIZE);
+
 /* ---- BMU helpers --------------------------------------------------- */
 
 /*
@@ -47,38 +55,45 @@
  * as the vendor driver does.  Starting a new request instead lost one
  * buffer for good with every timeout.
  */
-static int zx_bmu_alloc_bp(struct zx_eth_adapter *adapter)
+static int __zx_bmu_alloc_bp(struct zx_eth_adapter *adapter)
 {
 	void __iomem *base = adapter->base;
 	u32 val;
 	int ret;
 
-	if (adapter->bmu_alloc_pending) {
-		if (readl(base + ZX_BMU_BUF_ALLOC) & ZX_BMU_BUF_ALLOC_REQ) {
-			adapter->bmu_alloc_fail++;
-			return -EBUSY;
-		}
-		adapter->bmu_alloc_pending = false;
-		val = readl(base + ZX_BMU_BUF_ID);
-		if (val & ZX_BMU_BUF_ID_VALID) {
-			adapter->bmu_alloc_late++;
-			return FIELD_GET(ZX_BMU_BUF_ID_BP, val);
-		}
+	if (!adapter->bmu_alloc_pending) {
+		val = readl_relaxed(base + ZX_BMU_BUF_ALLOC);
+		writel_relaxed(val | ZX_BMU_BUF_ALLOC_REQ, base + ZX_BMU_BUF_ALLOC);
+		adapter->bmu_alloc_pending = true;
 	}
-
-	val = readl(base + ZX_BMU_BUF_ALLOC);
-	writel(val | ZX_BMU_BUF_ALLOC_REQ, base + ZX_BMU_BUF_ALLOC);
 	ret = readl_poll_timeout_atomic(base + ZX_BMU_BUF_ALLOC, val,
-					!(val & ZX_BMU_BUF_ALLOC_BUSY), 1, 1000);
-	if (!ret) {
-		val = readl(base + ZX_BMU_BUF_ID);
-		if (val & ZX_BMU_BUF_ID_VALID)
-			return FIELD_GET(ZX_BMU_BUF_ID_BP, val);
-		ret = -ENOSPC;
+					!(val & ZX_BMU_BUF_ALLOC_BUSY), 0, 1000);
+	if (ret) {
+		adapter->bmu_alloc_fail++;
+		return ret;
+	}
+	adapter->bmu_alloc_pending = false;
+	val = readl(base + ZX_BMU_BUF_ID);
+	if (!(val & ZX_BMU_BUF_ID_VALID)) {
+		adapter->bmu_alloc_fail++;
+		return -ENOSPC;
 	}
 
+	/* Prefetch the next buffer */
+	ret = FIELD_GET(ZX_BMU_BUF_ID_BP, val);
+	val = readl_relaxed(base + ZX_BMU_BUF_ALLOC);
+	writel_relaxed(val | ZX_BMU_BUF_ALLOC_REQ, base + ZX_BMU_BUF_ALLOC);
 	adapter->bmu_alloc_pending = true;
-	adapter->bmu_alloc_fail++;
+	return ret;
+}
+
+static int zx_bmu_alloc_bp(struct zx_eth_adapter *adapter)
+{
+	int ret;
+
+	spin_lock(&adapter->hw_lock);
+	ret = __zx_bmu_alloc_bp(adapter);
+	spin_unlock(&adapter->hw_lock);
 	return ret;
 }
 
@@ -87,7 +102,7 @@ static int zx_bmu_free_bp(struct zx_eth_adapter *adapter, u16 bp)
 	u32 val;
 	int ret = 0;
 
-	spin_lock_bh(&adapter->bmu_free_lock);
+	spin_lock_bh(&adapter->hw_lock);
 	if (!adapter->bmu_free_slots) {
 		ret = readl_poll_timeout_atomic(adapter->base + ZX_BMU_FREE_STATUS,
 						val, val & ZX_BMU_FREE_SLOTS, 1, 5000);
@@ -101,7 +116,7 @@ static int zx_bmu_free_bp(struct zx_eth_adapter *adapter, u16 bp)
 	adapter->bmu_free_slots--;
 	writel(bp, adapter->base + ZX_BMU_BUF_FREE);
 out:
-	spin_unlock_bh(&adapter->bmu_free_lock);
+	spin_unlock_bh(&adapter->hw_lock);
 	return ret;
 }
 
@@ -125,14 +140,16 @@ static int zx_rx_release(struct zx_eth_adapter *adapter, int q, int class,
 	u32 val;
 	int ret;
 
+	spin_lock(&adapter->hw_lock);
 	ret = readl_poll_timeout_atomic(adapter->base + ZX_RX_REL_CTRL,
 					val, !(val & ZX_RX_REL_BUSY), 1, 5000);
-	if (ret)
-		return ret;
-	writel(FIELD_PREP(ZX_RX_REL_COUNT, n) | FIELD_PREP(ZX_RX_REL_CLASS, class) |
-	       FIELD_PREP(ZX_RX_REL_QUEUE, q), adapter->base + ZX_RX_REL_DATA);
-	writel(ZX_RX_REL_BUSY, adapter->base + ZX_RX_REL_CTRL);
-	return 0;
+	if (!ret) {
+		writel(FIELD_PREP(ZX_RX_REL_COUNT, n) | FIELD_PREP(ZX_RX_REL_CLASS, class) |
+		       FIELD_PREP(ZX_RX_REL_QUEUE, q), adapter->base + ZX_RX_REL_DATA);
+		writel(ZX_RX_REL_BUSY, adapter->base + ZX_RX_REL_CTRL);
+	}
+	spin_unlock(&adapter->hw_lock);
+	return ret;
 }
 
 /*
@@ -241,12 +258,14 @@ void zx_set_trap_dmac(struct zx_eth_adapter *adapter, int idx, const u8 *mac)
 	writel(mac[0] << 8 | mac[1], adapter->base + ZX_SPA_TRAP_DMAC + idx * 8 + 4);
 }
 
-static void zx_dma_enable(struct zx_eth_adapter *adapter, bool enable)
+/* Match stock pon_tm_dma_init; these bits are also manipulated by
+ * dma_cfg_byteorder. This is configuration, NOT an established stop API.
+ */
+static void zx_dma_configure_stock(struct zx_eth_adapter *adapter)
 {
 	u32 val = readl(adapter->base + ZX_DMA_CTRL);
 
-	val &= ~ZX_DMA_CTRL_EN;
-	val |= ZX_DMA_CTRL_BIT21 | (enable ? ZX_DMA_CTRL_EN : 0);
+	val |= ZX_DMA_CTRL_BYTEORDER | ZX_DMA_CTRL_BIT21;
 	writel(val, adapter->base + ZX_DMA_CTRL);
 	readl(adapter->base + ZX_DMA_CTRL);
 }
@@ -359,7 +378,7 @@ static void zx_pp_init(struct zx_eth_adapter *adapter)
 
 	/* Mode-2 TX goes through the packet processor bridge.  The bootloader
 	 * initializes it for TFTP, but not when booting directly from NAND.
-	 * Initialize it ourselves, while DMA and the MACs are quiesced.  These
+	 * Initialize it with MACs disabled; full DMA quiescence is unproven.  These
 	 * are the H3600 bootloader's PP reset, bridge and classifier settings.
 	 */
 	writel(2, base + ZX_PP_RESET);
@@ -398,25 +417,26 @@ static void zx_pp_init(struct zx_eth_adapter *adapter)
 	writel(0, base + 0x3a0014);
 }
 
-/* Reset the switch and leave its ports and DMA stopped */
+/* Reset the switch; disable MACs/BMU. DMA quiescence is not established. */
 static void zx_hw_reset(struct zx_eth_adapter *adapter)
 {
 	void __iomem *base = adapter->base;
 	int i;
 
-	/* Master reset pulse */
+	/* Stop BMU refills from the bootloader's tables, then reset 10 ms */
+	writel(0, base + ZX_BMU_CTRL);
+	readl(base + ZX_BMU_CTRL);
 	writel(0, base + ZX_GLB_RESET);
-	fsleep(10);
+	msleep(10);
 	writel(0xffffffff, base + ZX_GLB_RESET);
 
 	/* Quiesce all 5 ports */
 	for (i = 0; i < ZX_NUM_PORTS; i++)
 		zx_port_enable(adapter, i, false);
-	zx_dma_enable(adapter, false);
 	writel(0, base + ZX_BMU_CTRL);
 }
 
-static int zx_hw_init(struct zx_eth_adapter *adapter)
+static int zx_hw_init(struct zx_eth_adapter *adapter, bool pattern)
 {
 	void __iomem *base = adapter->base;
 	static const int port_to_sw_idx[8] = { 0, 1, 2, 3, 4, -1, 5, 6 };
@@ -434,11 +454,12 @@ static int zx_hw_init(struct zx_eth_adapter *adapter)
 	       base + ZX_GLB_CLK_CTRL);
 	writel(GENMASK(ZX_NUM_PORTS - 1, 0), base + ZX_GLB_PORT_CLK_EN);
 	zx_pp_init(adapter);
+	zx_dma_configure_stock(adapter);
 
 	/* 2. Free-buffer index tables */
 	tab = adapter->tab0;
 	for (i = 0; i < ZX_TAB0_ENTRIES; i++)
-		tab[i] = cpu_to_be16(i);
+		tab[i] = cpu_to_be16(pattern ? (ZX_NUM_BUFFERS - 1 - i) : i);
 
 	tab = adapter->tab1;
 	for (i = 0; i < ZX_TAB1_ENTRIES; i++)
@@ -453,8 +474,10 @@ static int zx_hw_init(struct zx_eth_adapter *adapter)
 	writel((u32)adapter->tab0_dma, base + ZX_TM_TAB0_ADDR);
 	writel((u32)adapter->tab1_dma, base + ZX_TM_TAB1_ADDR);
 	writel(0x08000800, base + ZX_TM_TAB_LIMIT);
-	writel((u32)adapter->buf_pool_dma, base + ZX_TM_BUF_START);
-	writel((u32)adapter->buf_pool_dma + ZX_BUF_POOL_SIZE, base + ZX_TM_BUF_END);
+	dma_sync_single_for_device(adapter->dev, adapter->bufs_dma, ZX_BUFS_SIZE,
+				   DMA_BIDIRECTIONAL);
+	writel((u32)adapter->bufs_dma, base + ZX_TM_BUF_START);
+	writel((u32)adapter->bufs_dma + ZX_BUF_POOL_SIZE, base + ZX_TM_BUF_END);
 	writel((u32)adapter->rx_ring_dma, base + ZX_TM_BUF_F0);
 	writel(16, base + ZX_TM_CONFIG_START);
 
@@ -478,14 +501,11 @@ static int zx_hw_init(struct zx_eth_adapter *adapter)
 	writel(0,          base + ZX_BMU_CTRL);
 	writel(0x0104c040, base + ZX_BMU_CFG1);
 	writel(0x0104c040, base + ZX_BMU_CFG2);
-	/* Pool size in units of 32 buffers.  With a 2048-buffer pool the BMU
-	 * never fills its external free list (BPPE) after a cold NAND boot and
-	 * runs on its ~64-entry internal cache only.  4096 works.
-	 */
+	/* Pool size in units of 32 buffers; must match CFG 0x0104c040 */
 	writel(ZX_NUM_BUFFERS / 32 - 1, base + ZX_BMU_LIMIT1);
-	writel(15,         base + ZX_BMU_LIMIT2);
+	writel(ZX_JUMBO_BUFFERS / 32 - 1, base + ZX_BMU_LIMIT2);
 	writel(ZX_NUM_BUFFERS << 16, base + ZX_BMU_THRES1);
-	writel(0x2000000,  base + ZX_BMU_THRES2);
+	writel(ZX_JUMBO_BUFFERS << 16, base + ZX_BMU_THRES2);
 	writel(0,          base + ZX_BMU_BUF_ALLOC);
 	writel(ZX_BMU_CTRL_EN, base + ZX_BMU_CTRL);
 
@@ -503,6 +523,7 @@ static int zx_hw_init(struct zx_eth_adapter *adapter)
 	adapter->tx_complete_cnt = 0;
 	adapter->tx_done_excess = 0;
 	adapter->bmu_free_slots = 0;
+	adapter->bmu_alloc_pending = false;
 
 	writel((u32)adapter->buf_pool_dma + ZX_AREA50_OFFSET, base + ZX_DMA_AREA50);
 	writel((u32)adapter->tx_ring_dma, base + ZX_DMA_TX_RING);
@@ -620,7 +641,8 @@ static netdev_tx_t zx_eth_xmit(struct sk_buff *skb, struct net_device *netdev)
 	}
 
 	spin_lock_bh(&adapter->tx_lock);
-	zx_tx_reclaim(adapter);
+	if (adapter->tx_pending >= ZX_TX_RECLAIM_MIN)
+		zx_tx_reclaim(adapter);
 	/*
 	 * The ports share the ring.  The queues are stopped as soon as it is
 	 * full, but another port's transmit may already be waiting for the
@@ -646,7 +668,7 @@ static netdev_tx_t zx_eth_xmit(struct sk_buff *skb, struct net_device *netdev)
 		return NETDEV_TX_OK;
 	}
 
-	buf_ptr = (u8 *)adapter->buffer_pool + ((u32)bp * ZX_BUF_SIZE) + 16;
+	buf_ptr = adapter->bufs + (u32)bp * ZX_BUF_SIZE + 16;
 	if (skb_copy_bits(skb, 0, buf_ptr, len)) {
 		zx_bmu_free_bp(adapter, bp);
 		spin_unlock_bh(&adapter->tx_lock);
@@ -655,6 +677,9 @@ static netdev_tx_t zx_eth_xmit(struct sk_buff *skb, struct net_device *netdev)
 		return NETDEV_TX_OK;
 	}
 
+	dma_sync_single_for_device(adapter->dev,
+				   adapter->bufs_dma + (u32)bp * ZX_BUF_SIZE + 16,
+				   len, DMA_TO_DEVICE);
 	tx_idx = adapter->tx_cur_idx % ZX_NUM_TX_DESC;
 	desc = (__le32 *)adapter->tx_ring + tx_idx * (ZX_DESC_SIZE / sizeof(*desc));
 
@@ -671,7 +696,9 @@ static netdev_tx_t zx_eth_xmit(struct sk_buff *skb, struct net_device *netdev)
 	((u8 *)desc)[8] = (u8)(bp >> 7);
 
 	dma_wmb();
+	spin_lock(&adapter->hw_lock);
 	writel(1, base + ZX_DMA_TX_START);
+	spin_unlock(&adapter->hw_lock);
 
 	adapter->tx_cur_idx++;
 	adapter->tx_pending++;
@@ -714,7 +741,10 @@ static int zx_eth_rx(struct zx_eth_adapter *adapter, int budget)
 			u32 idx = adapter->rx_cur_idx[q] % ZX_NUM_RX_DESC;
 			__le32 *desc = adapter->rx_ring + q * ZX_RX_QUEUE_STRIDE +
 				       idx * ZX_DESC_SIZE;
-			u16 bp, len;
+			u16 bp, len, free_bp;
+			bool jumbo;
+			u32 pool_limit, off;
+			u8 *packet;
 			int port;
 			struct sk_buff *skb;
 			struct net_device *dest_dev;
@@ -724,7 +754,11 @@ static int zx_eth_rx(struct zx_eth_adapter *adapter, int budget)
 			len = (le32_to_cpu(desc[3]) >> 2) & 0x3fff;
 			port = (((u8 *)desc)[6] >> 3) ? ((((u8 *)desc)[6] >> 3) - 1) : 0;
 
-			if (bp >= ZX_NUM_BUFFERS || len < ETH_HLEN || len > 1536) {
+			jumbo = READ_ONCE(((u8 *)desc)[9]) & 1;
+			pool_limit = jumbo ? ZX_JUMBO_BUFFERS : ZX_NUM_BUFFERS;
+			free_bp = bp | (jumbo ? BIT(15) : 0);
+
+			if (bp >= pool_limit || len < ETH_HLEN || len > 1536) {
 				u32 scan, idx2, found = 0;
 
 				if (adapter->rx_synced[q]) {
@@ -748,8 +782,8 @@ static int zx_eth_rx(struct zx_eth_adapter *adapter, int budget)
 					adapter->rx_cur_idx[q]++;
 					work_done++;
 					avail--;
-					if (bp && bp < ZX_NUM_BUFFERS &&
-					    zx_bmu_free_bp(adapter, bp))
+					if ((bp || jumbo) && bp < pool_limit &&
+					    zx_bmu_free_bp(adapter, free_bp))
 						adapter->bmu_free_fail++;
 					continue;
 				}
@@ -757,6 +791,7 @@ static int zx_eth_rx(struct zx_eth_adapter *adapter, int budget)
 				for (scan = 1; scan < ZX_NUM_RX_DESC; scan++) {
 					__le32 *d2;
 					u16 bp2, len2;
+					bool jumbo2;
 
 					idx2 = (idx + scan) % ZX_NUM_RX_DESC;
 					d2 = adapter->rx_ring + q * ZX_RX_QUEUE_STRIDE +
@@ -765,7 +800,8 @@ static int zx_eth_rx(struct zx_eth_adapter *adapter, int budget)
 					bp2 = (((u8 *)d2)[7] >> 1) |
 					      ((u16)((u8 *)d2)[8] << 7);
 					len2 = (le32_to_cpu(d2[3]) >> 2) & 0x3fff;
-					if (bp2 < ZX_NUM_BUFFERS &&
+					jumbo2 = READ_ONCE(((u8 *)d2)[9]) & 1;
+					if (bp2 < (jumbo2 ? ZX_JUMBO_BUFFERS : ZX_NUM_BUFFERS) &&
 					    len2 >= ETH_HLEN && len2 <= 1536) {
 						found = 1;
 						break;
@@ -779,7 +815,7 @@ static int zx_eth_rx(struct zx_eth_adapter *adapter, int budget)
 			}
 			adapter->rx_synced[q] = true;
 
-			if (bp == 0) {
+			if (bp == 0 && !jumbo) {
 				adapter->rx_nobuf_cnt++;
 				zx_rx_consume(desc, rel);
 				adapter->rx_cur_idx[q]++;
@@ -788,9 +824,14 @@ static int zx_eth_rx(struct zx_eth_adapter *adapter, int budget)
 				continue;
 			}
 
-			/* Aliasing detector: frames from one of our own addresses */
+			off = (jumbo ? ZX_JUMBO_OFFSET : 0) + bp * ZX_BUF_SIZE + 16;
+			packet = adapter->bufs + off;
+			dma_sync_single_for_cpu(adapter->dev, adapter->bufs_dma + off,
+						len, DMA_FROM_DEVICE);
+
+			/* Drop frames sourced from our own addresses */
 			if (len >= ETH_HLEN) {
-				u8 *d = adapter->buffer_pool + bp * ZX_BUF_SIZE + 16;
+				u8 *d = packet;
 
 				if (zx_is_own_addr(adapter, d + ETH_ALEN)) {
 					adapter->rx_alias_cnt++;
@@ -804,7 +845,7 @@ static int zx_eth_rx(struct zx_eth_adapter *adapter, int budget)
 					 * its own: return it, or every such
 					 * frame leaks one BMU buffer.
 					 */
-					if (zx_bmu_free_bp(adapter, bp))
+					if (zx_bmu_free_bp(adapter, free_bp))
 						adapter->bmu_free_fail++;
 					continue;
 				}
@@ -816,8 +857,7 @@ static int zx_eth_rx(struct zx_eth_adapter *adapter, int budget)
 			skb = napi_alloc_skb(&adapter->napi, len);
 			if (skb && dest_dev && (dest_dev->flags & IFF_UP)) {
 				dma_rmb();
-				memcpy(skb_put(skb, len), adapter->buffer_pool +
-				       bp * ZX_BUF_SIZE + 16, len);
+				memcpy(skb_put(skb, len), packet, len);
 				skb->dev = dest_dev;
 				skb->protocol = eth_type_trans(skb, dest_dev);
 				napi_gro_receive(&adapter->napi, skb);
@@ -833,7 +873,7 @@ static int zx_eth_rx(struct zx_eth_adapter *adapter, int budget)
 			adapter->rx_cur_idx[q]++;
 			work_done++;
 			avail--;
-			if (zx_bmu_free_bp(adapter, bp))
+			if (zx_bmu_free_bp(adapter, free_bp))
 				adapter->bmu_free_fail++;
 		}
 		if (rel[0] || rel[1])
@@ -1254,7 +1294,7 @@ static int zx_eth_probe(struct platform_device *pdev)
 
 	adapter->dev = dev;
 	spin_lock_init(&adapter->tx_lock);
-	spin_lock_init(&adapter->bmu_free_lock);
+	spin_lock_init(&adapter->hw_lock);
 	mutex_init(&adapter->ppe_lock);
 	spin_lock_init(&adapter->trap_lock);
 	mutex_init(&adapter->sw_lock);
@@ -1276,6 +1316,12 @@ static int zx_eth_probe(struct platform_device *pdev)
 		ret = -ENOMEM;
 		goto err_hashtable;
 	}
+	adapter->bufs = dma_alloc_noncoherent(dev, ZX_BUFS_SIZE, &adapter->bufs_dma,
+					      DMA_BIDIRECTIONAL, GFP_KERNEL);
+	if (!adapter->bufs) {
+		ret = -ENOMEM;
+		goto err_dma;
+	}
 	adapter->tab0 = adapter->buffer_pool + ZX_TAB0_OFFSET;
 	adapter->tab0_dma = adapter->buf_pool_dma + ZX_TAB0_OFFSET;
 	adapter->tab1 = adapter->buffer_pool + ZX_TAB1_OFFSET;
@@ -1285,7 +1331,7 @@ static int zx_eth_probe(struct platform_device *pdev)
 	adapter->tx_ring = adapter->buffer_pool + ZX_TX_OFFSET;
 	adapter->tx_ring_dma = adapter->buf_pool_dma + ZX_TX_OFFSET;
 
-	ret = zx_hw_init(adapter);
+	ret = zx_hw_init(adapter, false);
 	if (ret)
 		goto err_dma;
 
@@ -1400,8 +1446,8 @@ static int zx_eth_probe(struct platform_device *pdev)
 	if (ret)
 		goto err_napi;
 
-	/* Start DMA only after every port, NAPI and the interrupt are ready. */
-	zx_dma_enable(adapter, true);
+	/* Apply stock configuration; this is not an established DMA start API. */
+	zx_dma_configure_stock(adapter);
 
 	for (i = 0; i < ZX_NUM_PORTS; i++) {
 		if (!adapter->ports[i])
@@ -1442,10 +1488,9 @@ err_disconnect:
 		}
 	}
 err_dma:
-	/* A failed or deferred probe must leave no DMA targeting this arena. */
+	/* DMA idle is unproven after reset, so the arena is kept */
 	zx_hw_reset(adapter);
-	dma_free_coherent(dev, ZX_DMA_ARENA_SIZE, adapter->buffer_pool,
-			  adapter->buf_pool_dma);
+	readl(adapter->base + ZX_BMU_CTRL);
 err_hashtable:
 	rhashtable_destroy(&adapter->ppe_flows);
 	return ret;

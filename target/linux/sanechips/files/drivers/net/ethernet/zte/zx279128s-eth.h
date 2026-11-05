@@ -134,8 +134,8 @@
 /* DMA engine between the switch and the CPU */
 #define ZX_DMA_BASE		(ZX_TM_BASE + 0x10000)
 #define ZX_DMA_CTRL		(ZX_DMA_BASE + 0x00)
-#define  ZX_DMA_CTRL_EN		GENMASK(19, 16)
-#define  ZX_DMA_CTRL_BIT21	BIT(21)		/* always set, as in the vendor code */
+#define  ZX_DMA_CTRL_BYTEORDER		GENMASK(19, 16)
+#define  ZX_DMA_CTRL_BIT21	BIT(21)		/* stock init sets this bit; function not documented */
 #define ZX_DMA_RX_IRQ_TIMER	(ZX_DMA_BASE + 0x30)	/* in 20 ns ticks */
 #define ZX_DMA_RX_IRQ_FRAMES	(ZX_DMA_BASE + 0x34)
 #define ZX_DMA_RING_CFG		(ZX_DMA_BASE + 0x3c)
@@ -209,8 +209,8 @@
 /* Bridge ports: 0 is the PON side, 1-5 are the switch ports 0-4 */
 #define ZX_BRPORT(p)		((p) + 1)
 
-/* DMA buffer pool: 4096 buffers x 2048 bytes = 8 MiB */
-#define ZX_NUM_BUFFERS		4096
+/* DMA buffer pool: 2048 buffers x 2048 bytes = 4 MiB, as BMU CFG 0x0104c040 */
+#define ZX_NUM_BUFFERS		2048
 #define ZX_BUF_SIZE		2048
 #define ZX_BUF_POOL_SIZE	(ZX_NUM_BUFFERS * ZX_BUF_SIZE)
 
@@ -221,6 +221,8 @@
 /* DMA descriptor rings */
 #define ZX_NUM_TX_DESC		1024
 #define ZX_TX_QUEUE_LIMIT	256
+/* Reclaim sent frames on transmit only once this many are pending */
+#define ZX_TX_RECLAIM_MIN	64
 #define ZX_TX_POLL_US		250	/* see zx_tx_kick() */
 
 /*
@@ -235,8 +237,13 @@
 
 /* Layout of the 16 MiB DMA arena */
 #define ZX_DMA_ARENA_SIZE	0x1000000
-#define ZX_TAB0_OFFSET		0x800000
-#define ZX_TAB1_OFFSET		0x808000
+#define ZX_JUMBO_OFFSET		ZX_BUF_POOL_SIZE
+#define ZX_JUMBO_BUFFERS	512
+#define ZX_JUMBO_SIZE		(ZX_JUMBO_BUFFERS * ZX_BUF_SIZE)
+/* Cached packet buffers: normal pool, then jumbo pool */
+#define ZX_BUFS_SIZE		(ZX_BUF_POOL_SIZE + ZX_JUMBO_SIZE)
+#define ZX_TAB0_OFFSET		0x900000
+#define ZX_TAB1_OFFSET		0x910000
 #define ZX_RX_OFFSET		0xa00000
 #define ZX_AREA50_OFFSET	0xb00000
 #define ZX_TX_OFFSET		0xc00000
@@ -293,6 +300,8 @@ struct zx_eth_adapter {
 
 	/* DMA arena remains allocated across down/up */
 	void			*buffer_pool;
+	u8			*bufs;
+	dma_addr_t		bufs_dma;
 	dma_addr_t		buf_pool_dma;
 	void			*tx_ring;
 	dma_addr_t		tx_ring_dma;
@@ -322,8 +331,8 @@ struct zx_eth_adapter {
 
 	/* TX ring, BMU buffer allocation and the TX counters */
 	spinlock_t		tx_lock;
-	/* BMU free register and bmu_free_slots */
-	spinlock_t		bmu_free_lock;
+	/* BMU alloc/free, RX release and TX start registers */
+	spinlock_t		hw_lock;
 
 	/* MAC counters of all ports, read before their 32 bits wrap */
 	struct mutex		mib_lock;
