@@ -123,7 +123,7 @@
 	};
 };
 
-/* Stock layout, read-only */
+/* Stock layout; OpenWrt replaces the second firmware bank (kernel2) */
 &spifc {
 	status = "okay";
 
@@ -144,10 +144,10 @@
 				read-only;
 			};
 
+			/* BootImageNum selects the bank U-Boot boots */
 			partition@200000 {
 				label = "others";
 				reg = <0x200000 0x400000>;
-				read-only;
 			};
 
 			partition@600000 {
@@ -180,10 +180,15 @@
 				read-only;
 			};
 
+			/* Bank header and the JFFS2 holding /0uImage */
 			partition@3a00000 {
-				label = "kernel2";
-				reg = <0x3a00000 0x2000000>;
-				read-only;
+				label = "kernel";
+				reg = <0x3a00000 0x620000>;
+			};
+
+			partition@4020000 {
+				label = "ubi";
+				reg = <0x4020000 0x19e0000>;
 			};
 		};
 	};

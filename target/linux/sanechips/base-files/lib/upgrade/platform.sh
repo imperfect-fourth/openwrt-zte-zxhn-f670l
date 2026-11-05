@@ -223,12 +223,36 @@ h3600_do_upgrade() {
 	nand_do_upgrade_success
 }
 
+# The stock U-Boot boots the bank that BootImageNum in "others" names
+f670l_boot_openwrt_bank() {
+	local others=/tmp/others.bin
+	local mtd="$(find_mtd_index others)"
+
+	[ -n "$mtd" ] || return 1
+	dd if=/dev/mtd$mtd of=$others bs=128k count=1 2>/dev/null || return 1
+	case "$(dd if=$others bs=24 count=1 2>/dev/null)" in
+	"BootImageNum=0x00000001,") return 0 ;;
+	"BootImageNum=0x00000000,") ;;
+	*)
+		echo "others: BootImageNum not found"
+		return 1
+		;;
+	esac
+	printf "BootImageNum=0x00000001," | \
+		dd of=$others bs=24 count=1 conv=notrunc 2>/dev/null
+	mtd write $others others
+}
+
 platform_check_image() {
 	local board=$(board_name)
 
 	case "$board" in
 	zte,zxhn-h3600)
 		h3600_check_image "$1"
+		return $?
+		;;
+	zte,zxhn-f670l)
+		nand_do_platform_check "zte_zxhn-f670l" "$1"
 		return $?
 		;;
 	esac
@@ -242,6 +266,10 @@ platform_do_upgrade() {
 	case "$board" in
 	zte,zxhn-h3600)
 		h3600_do_upgrade "$1"
+		;;
+	zte,zxhn-f670l)
+		f670l_boot_openwrt_bank || nand_do_upgrade_failed
+		nand_do_upgrade "$1"
 		;;
 	*)
 		default_do_upgrade "$1"

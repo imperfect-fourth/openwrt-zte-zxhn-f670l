@@ -18,7 +18,7 @@ endef
 # manager read kernel bytes as buffer numbers: it locks up (no RX, no TX)
 # and the hardware writes packet data into the kernel.  Load the initramfs
 # kernel at 0x48008000 instead (AUTO_ZRELADDR unpacks it there); the RAM
-# below 0x48000000 is left unused by this RAM-only system.
+# below 0x48000000 is left unused. The F670L flash kernel uses the same address.
 define Build/uImage-ramboot
 	$(if $(UIMAGE_TIME),SOURCE_DATE_EPOCH="$(UIMAGE_TIME)") \
 	mkimage -A $(LINUX_KARCH) -O linux -T kernel -C none \
@@ -26,6 +26,20 @@ define Build/uImage-ramboot
 		-n '$(call toupper,$(LINUX_KARCH)) $(VERSION_DIST) Linux-$(LINUX_VERSION)' \
 		-d $@ $@.new
 	mv $@.new $@
+endef
+
+# U-Boot loads /0uImage from a JFFS2 in the firmware bank it boots. It only
+# scans whole eraseblocks, so the JFFS2 is padded to one.
+define Build/zte-bank
+	rm -rf $@.root
+	mkdir -p $@.root
+	mv $@ $@.root/0uImage
+	$(STAGING_DIR_HOST)/bin/mkfs.jffs2 --little-endian --eraseblock=0x20000 \
+		--no-cleanmarkers --pad --squash -x lzma -x rtime \
+		--root=$@.root --output=$@.jffs2
+	SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) $(PYTHON) ./zte-bank.py \
+		$@.jffs2 "OpenWrt" $@
+	rm -rf $@.root $@.jffs2
 endef
 
 define Device/Default
@@ -57,18 +71,19 @@ define Device/zte_zxhn-h3600
 endef
 TARGET_DEVICES += zte_zxhn-h3600
 
-# RAM boot only until a flash layout is supported
 define Device/zte_zxhn-f670l
   DEVICE_MODEL := ZXHN F670L
   DEVICE_DTS := zx279128s-zte-zxhn-f670l
   DEVICE_PACKAGES := kmod-leds-gpio kmod-usb-ledtrig-usbport
   KERNEL_LOADADDR := 0x48008000
   KERNEL_ENTRY := 0x48008000
-  KERNEL := kernel-bin | append-dtb
+  KERNEL_SIZE := 6272k
+  KERNEL := kernel-bin | append-dtb | uImage-ramboot | zte-bank | \
+	check-size $$(KERNEL_SIZE)
   KERNEL_INITRAMFS := kernel-bin | append-dtb | uImage-ramboot
   KERNEL_INITRAMFS_SUFFIX := .uImage
-  IMAGES :=
-  ARTIFACTS :=
+  IMAGES := sysupgrade.bin
+  IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
 endef
 TARGET_DEVICES += zte_zxhn-f670l
 

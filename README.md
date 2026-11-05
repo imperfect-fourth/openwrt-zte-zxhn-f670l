@@ -4,9 +4,9 @@ An [OpenWrt](https://github.com/openwrt/openwrt) fork with support for the
 ZTE ZXHN F670L (ZX279128S SoC), built on the ZX279128S/H3600 port by
 [Navid Ghahremani](https://github.com/ghahramani/openwrt).
 
-**RAM boot only.** The image runs from RAM after a TFTP download from the
-stock U-Boot. Nothing is written to flash, and a power cycle returns to the
-stock firmware.
+OpenWrt is first started from RAM over TFTP, then installed into the second
+stock firmware bank. The stock firmware in the first bank, U-Boot and the
+stock data partitions are kept.
 
 ## Status
 
@@ -20,7 +20,7 @@ stock firmware.
 | USB | Not tested |
 | Buttons (reset, WPS, Wi-Fi) | Not tested |
 | GPON, phone port | Not supported |
-| Installation to flash | Not supported yet |
+| Installation to flash | Works, upgrades keep settings |
 
 Each router's MAC addresses and Wi-Fi calibration are read at boot from its
 own stock partitions (`parameter-tags`, `wlan`), mounted read-only. The
@@ -31,7 +31,7 @@ image contains no unit data.
 | | |
 |---|---|
 | SoC | ZTE ZX279128S, 2x Cortex-A9 |
-| RAM | 256 MiB (128 MiB usable from a RAM boot) |
+| RAM | 256 MiB (128 MiB usable) |
 | Flash | 256 MiB SPI NAND |
 | Wi-Fi | MediaTek MT7603E (2.4 GHz), MT7663 (5 GHz), on PCIe |
 
@@ -51,8 +51,12 @@ make -j$(nproc)
 ```
 
 The first build also builds the toolchain and takes about an hour. The
-image is
-`bin/targets/sanechips/generic/openwrt-sanechips-generic-zte_zxhn-f670l-initramfs.uImage`.
+images are in `bin/targets/sanechips/generic/`:
+
+| File | Use |
+|---|---|
+| `openwrt-sanechips-generic-zte_zxhn-f670l-initramfs.uImage` | RAM boot over TFTP |
+| `openwrt-sanechips-generic-zte_zxhn-f670l-squashfs-sysupgrade.bin` | Installation and upgrades |
 
 In `make menuconfig`, `*` builds a package into the image and `M` builds it
 as a separate package. Examples:
@@ -64,10 +68,9 @@ as a separate package. Examples:
 | WireGuard | `wireguard-tools`, `luci-proto-wireguard` |
 | Dynamic DNS | `luci-app-ddns` |
 
-About 118 MiB of RAM is free to the system, and a RAM-boot image keeps all
-its packages in RAM, so keep the selection small.
+About 118 MiB of RAM is free to the system, so keep the selection small.
 
-## Boot
+## RAM boot
 
 You need a 3.3 V USB-UART adapter and a TFTP server on `192.168.2.2`.
 
@@ -83,13 +86,48 @@ You need a 3.3 V USB-UART adapter and a TFTP server on `192.168.2.2`.
    ```
 5. After about a minute, open http://192.168.2.1 (user `root`, no password).
 
-To reboot back to U-Boot without a power cycle:
+## Install to flash
+
+1. RAM-boot OpenWrt as above.
+2. Copy the sysupgrade image to the router:
+   ```sh
+   scp -O openwrt-sanechips-generic-zte_zxhn-f670l-squashfs-sysupgrade.bin root@192.168.2.1:/tmp/
+   ```
+3. Install it:
+   ```sh
+   sysupgrade -n /tmp/openwrt-sanechips-generic-zte_zxhn-f670l-squashfs-sysupgrade.bin
+   ```
+
+The router reboots into OpenWrt from flash. The installation:
+
+- replaces the second firmware bank (`kernel2`, 0x3a00000, 32 MiB) with the
+  bank header and kernel (`kernel`) and a UBI root filesystem (`ubi`);
+- sets `BootImageNum=0x00000001` in the `others` partition, so U-Boot boots
+  that bank.
+
+If the OpenWrt kernel cannot be loaded, U-Boot boots the stock firmware in
+the first bank. UART and the RAM boot above always work for recovery.
+
+Back up the whole flash first if you can; the second stock bank is lost.
+
+## Upgrade
+
+Use `sysupgrade` or LuCI (System, Backup / Flash Firmware) with the
+sysupgrade image. Settings are kept.
+
+## Back to stock (untested)
+
+Make U-Boot boot the stock firmware in the first bank again:
 
 ```sh
-ubus call system watchdog '{"magicclose":false}'; ubus call system watchdog '{"stop":true}'
+dd if=/dev/mtd1 of=/tmp/others.bin bs=128k count=1
+printf 'BootImageNum=0x00000000,' | dd of=/tmp/others.bin bs=24 count=1 conv=notrunc
+mtd write /tmp/others.bin others
+reboot
 ```
 
-The watchdog resets the board about 30 s later.
+Check first that `/dev/mtd1` is `others` (`cat /proc/mtd`) and that
+`/tmp/others.bin` starts with `BootImageNum=0x00000001,`.
 
 ## Credits
 
