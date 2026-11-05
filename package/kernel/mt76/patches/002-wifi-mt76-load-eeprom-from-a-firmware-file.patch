@@ -1,0 +1,59 @@
+From: Divyansh <divi09112@gmail.com>
+Subject: [PATCH] wifi: mt76: load the EEPROM from a firmware file
+
+Some boards keep the calibration in a vendor filesystem with no fixed
+offset. Let the device tree name a firmware file for it.
+---
+--- a/eeprom.c
++++ b/eeprom.c
+@@ -6,6 +6,7 @@
+ #include <linux/of_net.h>
+ #include <linux/mtd/mtd.h>
+ #include <linux/mtd/partitions.h>
++#include <linux/firmware.h>
+ #include <linux/nvmem-consumer.h>
+ #include <linux/etherdevice.h>
+ #include "mt76.h"
+@@ -151,6 +152,29 @@
+ }
+ EXPORT_SYMBOL_GPL(mt76_get_of_data_from_nvmem);
+ 
++static int mt76_get_of_eeprom_file(struct mt76_dev *dev, void *eep, int len)
++{
++	const struct firmware *fw;
++	const char *name;
++	int ret;
++
++	if (of_property_read_string(dev->dev->of_node, "mediatek,eeprom-file",
++				    &name))
++		return -ENOENT;
++
++	ret = request_firmware(&fw, name, dev->dev);
++	if (ret)
++		return ret;
++
++	if (fw->size > len)
++		ret = -EINVAL;
++	else
++		memcpy(eep, fw->data, fw->size);
++	release_firmware(fw);
++
++	return ret;
++}
++
+ static int mt76_get_of_eeprom(struct mt76_dev *dev, void *eep, int len)
+ {
+ 	struct device_node *np = dev->dev->of_node;
+@@ -167,7 +191,11 @@
+ 	if (!ret)
+ 		return 0;
+ 
+-	return mt76_get_of_data_from_nvmem(dev, eep, "eeprom", len);
++	ret = mt76_get_of_data_from_nvmem(dev, eep, "eeprom", len);
++	if (!ret)
++		return 0;
++
++	return mt76_get_of_eeprom_file(dev, eep, len);
+ }
+ 
+ int
