@@ -1,0 +1,44 @@
+--- a/drivers/tty/serial/amba-pl011.c
++++ b/drivers/tty/serial/amba-pl011.c
+@@ -2737,6 +2737,41 @@
+ OF_EARLYCON_DECLARE(pl011, "arm,sbsa-uart", pl011_early_console_setup);
+ 
+ /*
++ * ZTE zx29 UARTs use a different register layout and BUSY bit. Keep the
++ * bootloader's baud rate and control state; only the transmit path differs.
++ * Explicit command line: earlycon=zteuart,0x94404000
++ */
++static void zteuart_early_putc(struct uart_port *port, unsigned char c)
++{
++	while (readl(port->membase + ZX_UART011_FR) & UART01x_FR_TXFF)
++		cpu_relax();
++	writel(c, port->membase + ZX_UART011_DR);
++	while (readl(port->membase + ZX_UART011_FR) & ZX_UART01x_FR_BUSY)
++		cpu_relax();
++}
++
++static void zteuart_early_write(struct console *con, const char *s,
++			       unsigned int n)
++{
++	struct earlycon_device *device = con->data;
++
++	uart_console_write(&device->port, s, n, zteuart_early_putc);
++}
++
++static int __init zteuart_early_console_setup(struct earlycon_device *device,
++					     const char *options)
++{
++	if (!device->port.membase)
++		return -ENODEV;
++
++	device->port.iotype = UPIO_MEM32;
++	device->con->write = zteuart_early_write;
++	return 0;
++}
++
++EARLYCON_DECLARE(zteuart, zteuart_early_console_setup);
++
++/*
+  * On Qualcomm Datacenter Technologies QDF2400 SOCs affected by
+  * Erratum 44, traditional earlycon can be enabled by specifying
+  * "earlycon=qdf2400_e44,<address>".  Any options are ignored.
